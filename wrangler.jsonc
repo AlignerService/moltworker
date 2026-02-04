@@ -9,7 +9,6 @@
     "enabled": true
   },
 
-  // ✅ IMPORTANT: These vars must live here, otherwise deploy will override remote config and REMOVE them
   "vars": {
     "DEV_MODE": "true",
     "AI_GATEWAY_BASE_URL": "https://gateway.ai.cloudflare.com/v1/b383e9cfa48f5c6dfd11b97078c03125/moltworker/openai"
