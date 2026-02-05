@@ -1,8 +1,7 @@
 FROM docker.io/cloudflare/sandbox:0.7.0
 
 # Install Node.js 22 (required by clawdbot) and rsync (for R2 backup sync)
-# The base image has Node 20, we need to replace it with Node 22
-# Using direct binary download for reliability
+# Base image has Node 20; we replace it with Node 22 via official binaries.
 ENV NODE_VERSION=22.13.1
 
 RUN ARCH="$(dpkg --print-architecture)" \
@@ -20,11 +19,12 @@ RUN ARCH="$(dpkg --print-architecture)" \
     && node --version \
     && npm --version
 
-# Install pnpm globally
+# pnpm (optional, but keeping since you used it)
 RUN npm install -g pnpm
 
-# Make npm less noisy and more reliable in CI (reduce hangs/timeouts)
-ENV NPM_CONFIG_AUDIT=false \
+# Make npm more reliable in CI and force the public npm registry explicitly
+ENV NPM_CONFIG_REGISTRY=https://registry.npmjs.org/ \
+    NPM_CONFIG_AUDIT=false \
     NPM_CONFIG_FUND=false \
     NPM_CONFIG_PROGRESS=false \
     NPM_CONFIG_LOGLEVEL=warn \
@@ -32,20 +32,20 @@ ENV NPM_CONFIG_AUDIT=false \
     NPM_CONFIG_FETCH_RETRY_MINTIMEOUT=20000 \
     NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT=120000
 
-# Install moltbot (CLI is still named clawdbot until upstream renames)
-# Pin to specific version for reproducible builds
-RUN npm install -g clawdbot@2026.1.24-3 --no-progress \
+# Quick connectivity sanity-check: can we resolve the version quickly?
+RUN npm view clawdbot@2026.1.24-3 version --registry=https://registry.npmjs.org/
+
+# Install clawdbot (CLI name is still clawdbot)
+RUN npm install -g clawdbot@2026.1.24-3 --no-progress --registry=https://registry.npmjs.org/ \
     && clawdbot --version
 
-# Create moltbot directories (paths still use clawdbot until upstream renames)
-# Templates are stored in /root/.clawdbot-templates for initialization
+# Create clawdbot directories (templates + workspace skills)
 RUN mkdir -p /root/.clawdbot \
     && mkdir -p /root/.clawdbot-templates \
     && mkdir -p /root/clawd \
     && mkdir -p /root/clawd/skills
 
 # Copy startup script
-# Build cache bust: 2026-01-28-v26-browser-skill
 COPY start-moltbot.sh /usr/local/bin/start-moltbot.sh
 RUN chmod +x /usr/local/bin/start-moltbot.sh
 
