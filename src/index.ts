@@ -139,21 +139,13 @@ app.use('*', async (c, next) => {
 // PUBLIC ROUTES: No Cloudflare Access authentication required
 // =============================================================================
 
-// Mount public routes first (before auth middleware)
-// Includes: /sandbox-health, /logo.png, /logo-small.png, /api/status, /_admin/assets/*
-app.route('/', publicRoutes);
-
-// Mount CDP routes (uses shared secret auth via query param, not CF Access)
-app.route('/cdp', cdp);
-
-// -----------------------------
-// EXTRA PUBLIC ROUTES (MVP TEST)
-// -----------------------------
+// IMPORTANT: Put fast public endpoints BEFORE mounting publicRoutes,
+// so they cannot be swallowed by any catch-all route inside publicRoutes.
 
 // Simple health endpoint (quick test in browser)
 app.get('/health', (c) => c.text('ok'));
 
-// Telegram webhook endpoint (public, no Cloudflare Access)
+// Telegram webhook endpoint (public, no Cloudflare Access, no container needed)
 app.post('/telegram/webhook', async (c) => {
   try {
     const update = await c.req.json<any>();
@@ -195,6 +187,13 @@ app.post('/telegram/webhook', async (c) => {
     return c.text('Bad Request', 400);
   }
 });
+
+// Mount public routes first (before auth middleware)
+// Includes: /sandbox-health, /logo.png, /logo-small.png, /api/status, /_admin/assets/*
+app.route('/', publicRoutes);
+
+// Mount CDP routes (uses shared secret auth via query param, not CF Access)
+app.route('/cdp', cdp);
 
 // =============================================================================
 // PROTECTED ROUTES: Cloudflare Access authentication required
@@ -308,8 +307,8 @@ app.all('*', async (c) => {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
 
     let hint = 'Check worker logs with: wrangler tail';
-    if (!c.env.ANTHROPIC_API_KEY) {
-      hint = 'ANTHROPIC_API_KEY is not set. Run: wrangler secret put ANTHROPIC_API_KEY';
+    if (!c.env.ANTHROPIC_API_KEY && !c.env.AI_GATEWAY_API_KEY) {
+      hint = 'ANTHROPIC_API_KEY (or AI_GATEWAY_API_KEY) is not set. Add it as a secret in Cloudflare.';
     } else if (errorMessage.includes('heap out of memory') || errorMessage.includes('OOM')) {
       hint = 'Gateway ran out of memory. Try again or check for memory leaks.';
     }
@@ -356,107 +355,52 @@ app.all('*', async (c) => {
     serverWs.accept();
     containerWs.accept();
 
-    if (debugLogs) {
-      console.log('[WS] Both WebSockets accepted');
-      console.log('[WS] containerWs.readyState:', containerWs.readyState);
-      console.log('[WS] serverWs.readyState:', serverWs.readyState);
-    }
-
     // Relay messages from client to container
     serverWs.addEventListener('message', (event) => {
-      if (debugLogs) {
-        console.log(
-          '[WS] Client -> Container:',
-          typeof event.data,
-          typeof event.data === 'string' ? event.data.slice(0, 200) : '(binary)'
-        );
-      }
       if (containerWs.readyState === WebSocket.OPEN) {
         containerWs.send(event.data);
-      } else if (debugLogs) {
-        console.log('[WS] Container not open, readyState:', containerWs.readyState);
       }
     });
 
     // Relay messages from container to client, with error transformation
     containerWs.addEventListener('message', (event) => {
-      if (debugLogs) {
-        console.log(
-          '[WS] Container -> Client (raw):',
-          typeof event.data,
-          typeof event.data === 'string' ? event.data.slice(0, 500) : '(binary)'
-        );
-      }
       let data = event.data;
 
-      // Try to intercept and transform error messages
       if (typeof data === 'string') {
         try {
           const parsed = JSON.parse(data);
-          if (debugLogs) {
-            console.log('[WS] Parsed JSON, has error.message:', !!parsed.error?.message);
-          }
           if (parsed.error?.message) {
-            if (debugLogs) {
-              console.log('[WS] Original error.message:', parsed.error.message);
-            }
             parsed.error.message = transformErrorMessage(parsed.error.message, url.host);
-            if (debugLogs) {
-              console.log('[WS] Transformed error.message:', parsed.error.message);
-            }
             data = JSON.stringify(parsed);
           }
-        } catch (e) {
-          if (debugLogs) {
-            console.log('[WS] Not JSON or parse error:', e);
-          }
-        }
+        } catch {}
       }
 
       if (serverWs.readyState === WebSocket.OPEN) {
         serverWs.send(data);
-      } else if (debugLogs) {
-        console.log('[WS] Server not open, readyState:', serverWs.readyState);
       }
     });
 
     // Handle close events
     serverWs.addEventListener('close', (event) => {
-      if (debugLogs) {
-        console.log('[WS] Client closed:', event.code, event.reason);
-      }
       containerWs.close(event.code, event.reason);
     });
 
     containerWs.addEventListener('close', (event) => {
-      if (debugLogs) {
-        console.log('[WS] Container closed:', event.code, event.reason);
-      }
-      // Transform the close reason (truncate to 123 bytes max for WebSocket spec)
       let reason = transformErrorMessage(event.reason, url.host);
-      if (reason.length > 123) {
-        reason = reason.slice(0, 120) + '...';
-      }
-      if (debugLogs) {
-        console.log('[WS] Transformed close reason:', reason);
-      }
+      if (reason.length > 123) reason = reason.slice(0, 120) + '...';
       serverWs.close(event.code, reason);
     });
 
     // Handle errors
-    serverWs.addEventListener('error', (event) => {
-      console.error('[WS] Client error:', event);
+    serverWs.addEventListener('error', () => {
       containerWs.close(1011, 'Client error');
     });
 
-    containerWs.addEventListener('error', (event) => {
-      console.error('[WS] Container error:', event);
+    containerWs.addEventListener('error', () => {
       serverWs.close(1011, 'Container error');
     });
 
-    if (debugLogs) {
-      console.log('[WS] Returning intercepted WebSocket response');
-    }
     return new Response(null, {
       status: 101,
       webSocket: clientWs,
@@ -465,9 +409,7 @@ app.all('*', async (c) => {
 
   console.log('[HTTP] Proxying:', url.pathname + url.search);
   const httpResponse = await sandbox.containerFetch(request, MOLTBOT_PORT);
-  console.log('[HTTP] Response status:', httpResponse.status);
 
-  // Add debug header to verify worker handled the request
   const newHeaders = new Headers(httpResponse.headers);
   newHeaders.set('X-Worker-Debug', 'proxy-to-moltbot');
   newHeaders.set('X-Debug-Path', url.pathname);
