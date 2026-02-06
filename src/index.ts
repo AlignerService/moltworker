@@ -88,11 +88,11 @@ function validateRequiredEnv(env: MoltbotEnv): string[] {
 
 /**
  * Build sandbox options based on environment configuration.
- * 
+ *
  * SANDBOX_SLEEP_AFTER controls how long the container stays alive after inactivity:
  * - 'never' (default): Container stays alive indefinitely (recommended due to long cold starts)
  * - Duration string: e.g., '10m', '1h', '30s' - container sleeps after this period of inactivity
- * 
+ *
  * To reduce costs at the expense of cold start latency, set SANDBOX_SLEEP_AFTER to a duration:
  *   npx wrangler secret put SANDBOX_SLEEP_AFTER
  *   # Enter: 10m (or 1h, 30m, etc.)
@@ -146,6 +146,56 @@ app.route('/', publicRoutes);
 // Mount CDP routes (uses shared secret auth via query param, not CF Access)
 app.route('/cdp', cdp);
 
+// -----------------------------
+// EXTRA PUBLIC ROUTES (MVP TEST)
+// -----------------------------
+
+// Simple health endpoint (quick test in browser)
+app.get('/health', (c) => c.text('ok'));
+
+// Telegram webhook endpoint (public, no Cloudflare Access)
+app.post('/telegram/webhook', async (c) => {
+  try {
+    const update = await c.req.json<any>();
+
+    const chatId = update?.message?.chat?.id;
+    const text = update?.message?.text?.trim();
+
+    // Ignore non-text updates
+    if (!chatId || !text) return c.text('Ignored', 200);
+
+    const token = c.env.TELEGRAM_BOT_TOKEN;
+    if (!token) {
+      console.error('[TELEGRAM] Missing TELEGRAM_BOT_TOKEN secret');
+      return c.text('Server config error', 500);
+    }
+
+    // MVP reply (echo)
+    const reply = `Modtaget: ${text}`;
+
+    const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text: reply,
+        disable_web_page_preview: true,
+      }),
+    });
+
+    if (!res.ok) {
+      const body = await res.text();
+      console.error('[TELEGRAM] sendMessage failed:', res.status, body);
+      return c.text('Telegram send failed', 500);
+    }
+
+    return c.text('OK', 200);
+  } catch (err) {
+    console.error('[TELEGRAM] webhook error:', err);
+    return c.text('Bad Request', 400);
+  }
+});
+
 // =============================================================================
 // PROTECTED ROUTES: Cloudflare Access authentication required
 // =============================================================================
@@ -176,12 +226,15 @@ app.use('*', async (c, next) => {
     }
 
     // Return JSON error for API requests
-    return c.json({
-      error: 'Configuration error',
-      message: 'Required environment variables are not configured',
-      missing: missingVars,
-      hint: 'Set these using: wrangler secret put <VARIABLE_NAME>',
-    }, 503);
+    return c.json(
+      {
+        error: 'Configuration error',
+        message: 'Required environment variables are not configured',
+        missing: missingVars,
+        hint: 'Set these using: wrangler secret put <VARIABLE_NAME>',
+      },
+      503
+    );
   }
 
   return next();
@@ -193,7 +246,7 @@ app.use('*', async (c, next) => {
   const acceptsHtml = c.req.header('Accept')?.includes('text/html');
   const middleware = createAccessMiddleware({
     type: acceptsHtml ? 'html' : 'json',
-    redirectOnMissing: acceptsHtml
+    redirectOnMissing: acceptsHtml,
   });
 
   return middleware(c, next);
@@ -261,11 +314,14 @@ app.all('*', async (c) => {
       hint = 'Gateway ran out of memory. Try again or check for memory leaks.';
     }
 
-    return c.json({
-      error: 'Moltbot gateway failed to start',
-      details: errorMessage,
-      hint,
-    }, 503);
+    return c.json(
+      {
+        error: 'Moltbot gateway failed to start',
+        details: errorMessage,
+        hint,
+      },
+      503
+    );
   }
 
   // Proxy to Moltbot with WebSocket message interception
@@ -309,7 +365,11 @@ app.all('*', async (c) => {
     // Relay messages from client to container
     serverWs.addEventListener('message', (event) => {
       if (debugLogs) {
-        console.log('[WS] Client -> Container:', typeof event.data, typeof event.data === 'string' ? event.data.slice(0, 200) : '(binary)');
+        console.log(
+          '[WS] Client -> Container:',
+          typeof event.data,
+          typeof event.data === 'string' ? event.data.slice(0, 200) : '(binary)'
+        );
       }
       if (containerWs.readyState === WebSocket.OPEN) {
         containerWs.send(event.data);
@@ -321,7 +381,11 @@ app.all('*', async (c) => {
     // Relay messages from container to client, with error transformation
     containerWs.addEventListener('message', (event) => {
       if (debugLogs) {
-        console.log('[WS] Container -> Client (raw):', typeof event.data, typeof event.data === 'string' ? event.data.slice(0, 500) : '(binary)');
+        console.log(
+          '[WS] Container -> Client (raw):',
+          typeof event.data,
+          typeof event.data === 'string' ? event.data.slice(0, 500) : '(binary)'
+        );
       }
       let data = event.data;
 
